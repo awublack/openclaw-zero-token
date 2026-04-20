@@ -6,12 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="$SCRIPT_DIR/.openclaw-upstream-state"
 CONFIG_FILE="$STATE_DIR/openclaw.json"
 PID_FILE="$SCRIPT_DIR/.gateway.pid"
-PORT=3002
-
-# 为 API 调用定义一个安全的全局 Token（不用于 Web UI）
-API_TOKEN="62b791625fa441be036acd3c206b7e14e2bb13c803355823"
-# 完整 scopes 的 Token（包含 operator.write, operator.read, operator.admin 等所有权限）
-FULL_SCOPE_TOKEN="full-scope-62b791625fa441be036acd3c206b7e14e2bb13c803355823"
+PORT=3001
 
 # 日志文件名（区分不同实例）
 LOG_PREFIX="openclaw-upstream"
@@ -19,7 +14,7 @@ LOG_PREFIX="openclaw-upstream"
 # ─── 环境检测 ────────────────────────────────────────────────
 detect_os() {
   case "$OSTYPE" in
-    darwin*) echo "mac" ;;
+    darwin*)  echo "mac" ;;
     msys*|cygwin*|mingw*) echo "win" ;;
     *)
       if grep -qi microsoft /proc/version 2>/dev/null; then
@@ -68,7 +63,7 @@ open_browser() {
       if command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$url" 2>/dev/null &
       else
-        echo "请手动在浏览器中打开：$url"
+        echo "请手动在浏览器中打开: $url"
       fi
       ;;
   esac
@@ -101,10 +96,10 @@ EXAMPLE_CONFIG="$SCRIPT_DIR/.openclaw-state.example/openclaw.json"
 if [ ! -f "$CONFIG_FILE" ]; then
   if [ -f "$EXAMPLE_CONFIG" ]; then
     cp "$EXAMPLE_CONFIG" "$CONFIG_FILE"
-    echo "已从示例复制配置文件：$EXAMPLE_CONFIG -> $CONFIG_FILE"
+    echo "已从示例复制配置文件: $EXAMPLE_CONFIG -> $CONFIG_FILE"
   else
     echo '{}' > "$CONFIG_FILE"
-    echo "已创建空配置文件：$CONFIG_FILE（建议从 .openclaw-state.example/openclaw.json 复制完整配置）"
+    echo "已创建空配置文件: $CONFIG_FILE（建议从 .openclaw-state.example/openclaw.json 复制完整配置）"
   fi
 fi
 
@@ -141,67 +136,16 @@ start_gateway() {
   export OPENCLAW_CONFIG_PATH="$CONFIG_FILE"
   export OPENCLAW_STATE_DIR="$STATE_DIR"
   export OPENCLAW_GATEWAY_PORT="$PORT"
-export PROXY_PORT="$((PORT + 1))"  # 代理层使用 3003
-export API_TOKEN="$API_TOKEN"
-  # 设置默认 scopes，让 API 调用无需手动指定 x-openclaw-scopes
-  export OPENCLAW_GATEWAY_DEFAULT_SCOPES="operator.write"
 
-  echo "系统：$OS | Node: $($NODE --version 2>/dev/null)"
+  echo "系统: $OS  |  Node: $($NODE --version 2>/dev/null)"
   echo "启动 Gateway 服务..."
-  echo ""
-  echo "🔑 API Token: $API_TOKEN"
-  echo ""
-  echo "📝 使用方式 (自动添加 x-openclaw-scopes: operator.write):"
-  echo ""
-  echo "  # 聊天完成 (简化版，无需 x-openclaw-scopes):"
-  echo "  curl -H \"Authorization: Bearer $API_TOKEN\" \\"
-  echo "       -H \"x-openclaw-scopes: operator.write\" \\"
-  echo "       -H \"Content-Type: application/json\" \\"
-  echo "       -d '{\"model\":\"openclaw\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":false}' \\"
-  echo "       http://127.0.0.1:$PORT/v1/chat/completions"
-  echo ""
-  echo "  # 指定使用 DeepSeek 模型 (简化版):"
-  echo "  curl -H \"Authorization: Bearer $API_TOKEN\" \\"
-  echo "       -H \"x-openclaw-scopes: operator.write\" \\"
-  echo "       -H \"Content-Type: application/json\" \\"
-  echo "       -d '{\"model\":\"deepseek-web/deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],\"stream\":false}' \\"
-  echo "       http://127.0.0.1:$PORT/v1/chat/completions"
-  echo ""
-  echo "  # 只读操作 (如查看状态):"
-  echo "  curl -H \"Authorization: Bearer $API_TOKEN\" \\"
-  echo "       -H \"x-openclaw-scopes: operator.read\" \\"
-  echo "       http://127.0.0.1:$PORT/status"
-  echo ""
-  echo "可用的 scopes: operator.read, operator.write, operator.admin, operator.approvals, operator.pairing"
-  echo ""
-  echo "✅ 默认已启用 operator.write 权限，普通调用无需额外参数
-
-💡 简化测试：使用 ./test-api.sh 脚本自动添加所需 headers"
-  echo ""
-  echo "配置文件：$OPENCLAW_CONFIG_PATH"
-  echo "状态目录：$OPENCLAW_STATE_DIR"
-  echo "日志文件：$TMP_LOG"
-  echo "端口：$PORT"
+  echo "配置文件: $OPENCLAW_CONFIG_PATH"
+  echo "状态目录: $OPENCLAW_STATE_DIR"
+  echo "日志文件: $TMP_LOG"
+  echo "端口: $PORT"
   echo ""
 
-  # 添加默认 scopes 支持，让 API 调用无需手动指定 x-openclaw-scopes
-# 启动 Gateway
-nohup "$NODE" "$SCRIPT_DIR/openclaw.mjs" gateway --port "$PORT" --auth token > "$TMP_LOG" 2>&1 &
-GATEWAY_PID=$!
-
-# 等待 Gateway 启动
-sleep 2
-
-# 启动 OpenClaw API Server（完整的 OpenAI 兼容 API）
-echo "启动 OpenClaw API Server（完整的 OpenAI 兼容 API）..."
-export API_SERVER_PORT="$((PORT + 1))"  # 3003
-export OPENCLAW_GATEWAY_PORT="$PORT"   # 3002
-export API_TOKEN="$API_TOKEN"
-nohup "$NODE" "$SCRIPT_DIR/openclaw-api-server.js" > "$TMP_LOG.api" 2>&1 &
-API_SERVER_PID=$!
-echo "Gateway PID: $GATEWAY_PID"
-echo "API Server PID: $API_SERVER_PID"
-echo "API Server 端口：$API_SERVER_PORT"
+  nohup "$NODE" "$SCRIPT_DIR/openclaw.mjs" gateway --port "$PORT" > "$TMP_LOG" 2>&1 &
   GATEWAY_PID=$!
   echo "$GATEWAY_PID" > "$PID_FILE"
 
@@ -229,7 +173,6 @@ echo "API Server 端口：$API_SERVER_PORT"
       echo "⚠ curl 检测未成功，Gateway 可能尚未就绪，请稍后手动打开 Web UI"
     fi
     WEBUI_URL="http://127.0.0.1:$PORT/#token=${GATEWAY_TOKEN}"
-    echo ""
     echo "Gateway 服务已启动 (PID: $GATEWAY_PID)"
     echo "Web UI: $WEBUI_URL"
     if [ "$WEBUI_READY" -eq 1 ]; then
@@ -246,48 +189,12 @@ echo "API Server 端口：$API_SERVER_PORT"
   fi
 }
 
-# 简化的测试命令，自动添加 x-openclaw-scopes: operator.write
-test_api() {
-  local model="${1:-openclaw/deepseek-web}"
-  local message="${2:-Hello from OpenClaw!}"
-  
-  echo "测试 Gateway API..."
-  echo "模型：$model"
-  echo "消息：$message"
-  echo ""
-  
-  curl -s "http://127.0.0.1:$PORT/v1/chat/completions" \
-    -H "Authorization: Bearer $API_TOKEN" \
-    -H "x-openclaw-scopes: operator.write" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"model\": \"$model\",
-      \"messages\": [{\"role\": \"user\", \"content\": \"$message\"}],
-      \"stream\": false
-    }" | jq '.'
-}
-
-# API 代理命令 - 自动添加 x-openclaw-scopes: operator.write
-api_call() {
-  local model="${1:-openclaw/deepseek-web}"
-  local message="${2:-Hello}"
-  
-  curl -s "http://127.0.0.1:$PORT/v1/chat/completions" \
-    -H "Authorization: Bearer $API_TOKEN" \
-    -H "x-openclaw-scopes: operator.write" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"model\": \"$model\",
-      \"messages\": [{\"role\": \"user\", \"content\": \"$message\"}],
-      \"stream\": false
-    }"
-}
-
 update_cookie() {
   echo "更新 Claude Web Cookie..."
+
   if [ -z "$2" ]; then
     echo "错误：请提供完整的 cookie 字符串"
-    echo "用法：$0 update-cookie \"完整的 cookie 字符串\""
+    echo "用法: $0 update-cookie \"完整的cookie字符串\""
     echo ""
     echo "从浏览器获取 cookie："
     echo "1. 打开 https://claude.ai"
@@ -301,6 +208,7 @@ update_cookie() {
 
   COOKIE_STRING="$2"
   AUTH_FILE="$STATE_DIR/agents/main/agent/auth-profiles.json"
+
   SESSION_KEY=$(echo "$COOKIE_STRING" | grep -oP 'sessionKey=\K[^;]+' || echo "")
 
   if [ -z "$SESSION_KEY" ]; then
@@ -323,7 +231,7 @@ EOF
     echo "✓ SessionKey: ${SESSION_KEY:0:50}..."
     echo ""
     echo "现在重启服务："
-    echo " $0 restart"
+    echo "  $0 restart"
   else
     echo "错误：auth-profiles.json 不存在，请先运行 ./onboard.sh"
     exit 1
@@ -343,14 +251,6 @@ case "${1:-start}" in
   restart)
     stop_gateway
     start_gateway
-    ;;
-  test)
-    # 测试 API 调用，自动添加 x-openclaw-scopes: operator.write
-    test_api "${2:-openclaw/deepseek-web}" "${3:-Hello from OpenClaw!}"
-    ;;
-  api)
-    # API 调用，自动添加 x-openclaw-scopes: operator.write
-    api_call "${2:-openclaw/deepseek-web}" "${3:-Hello}"
     ;;
   status)
     if [ -f "$PID_FILE" ]; then
@@ -374,17 +274,16 @@ case "${1:-start}" in
     update_cookie "$@"
     ;;
   *)
-    echo "用法：$0 {start|stop|restart|test|status|update-cookie}"
+    echo "用法: $0 {start|stop|restart|status|update-cookie}"
     echo ""
     echo "命令说明："
-    echo "  start          - 启动 Gateway 服务"
-    echo "  stop           - 停止 Gateway 服务"
-    echo "  restart        - 重启 Gateway 服务"
-    echo "  status         - 查看服务状态"
-    echo "  update-cookie  - 更新 Claude Web cookie"
+    echo "  start         - 启动 Gateway 服务"
+    echo "  stop          - 停止 Gateway 服务"
+    echo "  restart       - 重启 Gateway 服务"
+    echo "  status        - 查看服务状态"
+    echo "  update-cookie - 更新 Claude Web cookie"
     echo ""
     echo "示例："
-    echo "  $0 start"
     echo "  $0 update-cookie \"sessionKey=sk-ant-...; anthropic-device-id=...\""
     exit 1
     ;;

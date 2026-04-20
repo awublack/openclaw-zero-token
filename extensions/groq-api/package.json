@@ -1,0 +1,10 @@
+{
+  "name": "@openclaw/groq-api-provider",
+  "version": "2026.4.8",
+  "private": true,
+  "description": "Official Groq API integration for chat completions. Requires API key.",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

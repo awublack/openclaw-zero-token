@@ -1,0 +1,17 @@
+{
+  "id": "groq-api",
+  "contracts": {
+    "chatProviders": ["groq-api"],
+    "tools": ["invoke_groq"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "description": "Groq API key (optional; can also be set via GROQ_API_KEY environment variable)"
+      }
+    }
+  }
+}

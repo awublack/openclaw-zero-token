@@ -1,0 +1,308 @@
+#!/usr/bin/env node
+/**
+ * OpenClaw API Server - 完整的 OpenAI 兼容 API 服务
+ * 
+ * 功能：
+ * - 自动添加 x-openclaw-scopes: operator.write
+ * - 支持 /v1/models 端点（模型发现）
+ * - 支持 /v1/chat/completions（流式/非流式）
+ * - 支持 /v1/completions（兼容旧版）
+ * - 完整的错误处理
+ * - CORS 支持
+ * - 请求日志
+ */
+
+import http from 'http';
+import { URL } from 'url';
+
+// ==================== 配置 ====================
+const CONFIG = {
+  port: process.env.API_SERVER_PORT || 3003,
+  gatewayPort: process.env.OPENCLAW_GATEWAY_PORT || 3002,
+  gatewayHost: '127.0.0.1',
+  apiToken: process.env.API_TOKEN || '62b791625fa441be036acd3c206b7e14e2bb13c803355823',
+  defaultScope: 'operator.write',
+};
+
+// 预定义的模型列表（也可从 Gateway 动态获取）
+const MODELS = [
+  { id: 'openclaw/deepseek-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/chatgpt-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/qwen-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/qwen-cn-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/glm-intl-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/glm-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/grok-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/doubao-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/gemini-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/kimi-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/perplexity-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+  { id: 'openclaw/xiaomimo-web', object: 'model', created: Date.now(), owned_by: 'openclaw' },
+];
+
+// ==================== 工具函数 ====================
+
+// 解析 JSON Body
+async function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (e) {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+// 发送 JSON 响应
+function sendJSON(res, statusCode, data) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  });
+  res.end(JSON.stringify(data));
+}
+
+// 发送流式响应
+function sendStream(res, data) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+// 日志
+function log(method, url, status, duration) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${method} ${url} - ${status} (${duration}ms)`);
+}
+
+// ==================== 请求处理 ====================
+
+// 处理 /v1/models - 获取模型列表
+async function handleModels(req, res) {
+  const startTime = Date.now();
+  
+  try {
+    // 尝试从 Gateway 动态获取模型列表
+    const gatewayModels = await fetchModelsFromGateway();
+    const models = gatewayModels.length > 0 ? gatewayModels : MODELS;
+    
+    log('GET', '/v1/models', 200, Date.now() - startTime);
+    sendJSON(res, 200, {
+      object: 'list',
+      data: models,
+    });
+  } catch (error) {
+    log('GET', '/v1/models', 500, Date.now() - startTime);
+    sendJSON(res, 500, { error: { message: error.message, type: 'server_error' } });
+  }
+}
+
+// 从 Gateway 动态获取模型
+async function fetchModelsFromGateway() {
+  return new Promise((resolve) => {
+    const req = http.request({
+      hostname: CONFIG.gatewayHost,
+      port: CONFIG.gatewayPort,
+      path: '/v1/models',
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.apiToken}`,
+        'x-openclaw-scopes': CONFIG.defaultScope,
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed.data || []);
+        } catch {
+          resolve([]);
+        }
+      });
+    });
+    
+    req.on('error', () => resolve([]));
+    req.setTimeout(2000, () => { req.destroy(); resolve([]); });
+    req.end();
+  });
+}
+
+// 处理 /v1/chat/completions - 聊天完成
+async function handleChatCompletions(req, res) {
+  const startTime = Date.now();
+  
+  try {
+    const body = await parseBody(req);
+    
+    // 验证必要字段
+    if (!body.model) {
+      log('POST', '/v1/chat/completions', 400, Date.now() - startTime);
+      return sendJSON(res, 400, { error: { message: 'Missing required field: model', type: 'invalid_request_error' } });
+    }
+    
+    if (!body.messages || !Array.isArray(body.messages)) {
+      log('POST', '/v1/chat/completions', 400, Date.now() - startTime);
+      return sendJSON(res, 400, { error: { message: 'Missing or invalid field: messages', type: 'invalid_request_error' } });
+    }
+    
+    // 转发请求到 Gateway
+    forwardToGateway(req, res, body, startTime);
+  } catch (error) {
+    log('POST', '/v1/chat/completions', 500, Date.now() - startTime);
+    sendJSON(res, 500, { error: { message: error.message, type: 'server_error' } });
+  }
+}
+
+// 转发请求到 Gateway
+function forwardToGateway(originalReq, res, body, startTime) {
+  const isStream = body.stream === true;
+  
+  const gatewayReq = http.request({
+    hostname: CONFIG.gatewayHost,
+    port: CONFIG.gatewayPort,
+    path: originalReq.url,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(JSON.stringify(body)),
+      'Authorization': `Bearer ${CONFIG.apiToken}`,
+      'x-openclaw-scopes': CONFIG.defaultScope, // 关键：自动添加 scopes
+    },
+  }, (gatewayRes) => {
+    // 设置响应头
+    res.statusCode = gatewayRes.statusCode;
+    res.setHeader('Content-Type', gatewayRes.headers['content-type'] || 'application/json');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    
+    if (isStream) {
+      // 流式响应
+      gatewayRes.on('data', chunk => {
+        res.write(chunk);
+      });
+      gatewayRes.on('end', () => {
+        res.end();
+        log('POST', '/v1/chat/completions (stream)', gatewayRes.statusCode, Date.now() - startTime);
+      });
+    } else {
+      // 非流式响应
+      let data = '';
+      gatewayRes.on('data', chunk => { data += chunk; });
+      gatewayRes.on('end', () => {
+        res.end(data);
+        log('POST', '/v1/chat/completions', gatewayRes.statusCode, Date.now() - startTime);
+      });
+    }
+  });
+  
+  gatewayReq.on('error', (error) => {
+    log('POST', '/v1/chat/completions', 502, Date.now() - startTime);
+    sendJSON(res, 502, { error: { message: `Gateway error: ${error.message}`, type: 'gateway_error' } });
+  });
+  
+  gatewayReq.setTimeout(60000, () => {
+    gatewayReq.destroy();
+    sendJSON(res, 504, { error: { message: 'Gateway timeout', type: 'timeout_error' } });
+  });
+  
+  gatewayReq.write(JSON.stringify(body));
+  gatewayReq.end();
+}
+
+// 处理 /v1/completions - 兼容旧版
+async function handleCompletions(req, res) {
+  // 转换为 chat/completions 格式
+  const body = await parseBody(req);
+  const chatBody = {
+    model: body.model || 'openclaw/default',
+    messages: [
+      { role: 'user', content: body.prompt || '' }
+    ],
+    stream: body.stream || false,
+  };
+  
+  // 重用 chat/completions 处理逻辑
+  await handleChatCompletions({ ...req, url: '/v1/chat/completions' }, res);
+}
+
+// ==================== 主服务器 ====================
+
+const server = http.createServer(async (req, res) => {
+  // CORS 预检
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    });
+    res.end();
+    return;
+  }
+  
+  const url = new URL(req.url, `http://127.0.0.1:${CONFIG.port}`);
+  
+  // 路由匹配
+  if (url.pathname === '/v1/models' && req.method === 'GET') {
+    await handleModels(req, res);
+  } else if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
+    await handleChatCompletions(req, res);
+  } else if (url.pathname === '/v1/completions' && req.method === 'POST') {
+    await handleCompletions(req, res);
+  } else if (url.pathname === '/health' || url.pathname === '/') {
+    sendJSON(res, 200, {
+      status: 'ok',
+      service: 'openclaw-api-server',
+      version: '1.0.0',
+      models: MODELS.map(m => m.id),
+    });
+  } else {
+    sendJSON(res, 404, { error: { message: `Not found: ${url.pathname}`, type: 'not_found' } });
+  }
+});
+
+// 启动服务器
+server.listen(CONFIG.port, () => {
+  console.log(`
+╔══════════════════════════════════════════════════════════╗
+║     OpenClaw API Server - OpenAI Compatible              ║
+╠══════════════════════════════════════════════════════════╣
+║  监听端口：${CONFIG.port}
+║  转发到：http://${CONFIG.gatewayHost}:${CONFIG.gatewayPort}
+║  自动 Scope: ${CONFIG.defaultScope}
+║  支持端点：                                              ║
+║    - GET  /v1/models                                     ║
+║    - POST /v1/chat/completions                           ║
+║    - POST /v1/completions                                ║
+║    - GET  /health                                        ║
+║  可用模型：${MODELS.length} 个                            ║
+╚══════════════════════════════════════════════════════════╝
+  `);
+});
+
+// 优雅关闭
+process.on('SIGTERM', () => {
+  console.log('收到 SIGTERM，关闭服务器...');
+  server.close(() => {
+    console.log('服务器已关闭');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('收到 SIGINT，关闭服务器...');
+  server.close(() => {
+    console.log('服务器已关闭');
+    process.exit(0);
+  });
+});
